@@ -39,7 +39,6 @@ import {
   Apple
 } from 'lucide-react';
 
-// --- CONFIGURAÇÃO FIREBASE ---
 const firebaseConfig = {
   apiKey: "AIzaSyBZuZ9ztJp58kDsHMTZ-1f0ReqNV2FXypo",
   authDomain: "fitpro-planner.firebaseapp.com",
