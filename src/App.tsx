@@ -1,46 +1,207 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
-  signOut, 
-  onAuthStateChanged,
-  updateProfile,
-  signInWithCustomToken,
-  signInAnonymously
-} from 'firebase/auth';
-import { 
-  getFirestore, 
-  doc, 
-  setDoc, 
-  getDoc, 
-  serverTimestamp
-} from 'firebase/firestore';
-import { 
-  Dumbbell, 
-  Calendar, 
-  User, 
-  Activity, 
-  LogOut, 
-  ChevronRight, 
-  CheckCircle2, 
-  Circle,
-  TrendingUp,
-  Scale,
-  Ruler,
-  AlertCircle,
-  Flame,
-  Menu,
-  X,
-  Utensils,
-  Zap,
-  Coffee,
-  Apple
-} from 'lucide-react';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from 'firebase/auth';
+import { getFirestore, doc, setDoc, onSnapshot, getDoc } from 'firebase/firestore'; 
+import { AlertTriangle, Dumbbell, Zap, TrendingUp, User as UserIcon, LogOut, CheckCircle, Save, CalendarDays, BarChart3, Clock } from 'lucide-react';
 
-// --- CONFIGURAÇÃO FIREBASE ---
-const firebaseConfig = {
+// --- TYPE DEFINITIONS ---
+
+// Define o tipo do usuário Firebase localmente. Usado para o usuário real e o mock.
+interface FirebaseUser {
+    uid: string;
+    email: string | null;
+}
+
+type Goal = 'HYPERTROPHY' | 'WEIGHT_LOSS' | 'ENDURANCE';
+type Frequency = '3' | '4' | '5' | '6';
+type Sex = 'MALE' | 'FEMALE';
+type BodyPart = 'chest' | 'back' | 'legs' | 'shoulders' | 'arms' | 'cardio' | 'core';
+type Page = 'login' | 'profile' | 'workout';
+
+interface Exercise {
+  name: string;
+  sets: number;
+  reps: string; // e.g., '8-12', '30 min', '10-15'
+}
+
+interface DailyWorkout {
+  day: string; // e.g., 'Day 1'
+  theme: string; // e.g., 'Push Day'
+  exercises: Exercise[];
+}
+
+interface WorkoutPlan {
+  goal: Goal;
+  frequency: Frequency;
+  dailyPlans: DailyWorkout[];
+  generatedOn: number; // Timestamp
+}
+
+interface UserProfile {
+  name: string;
+  age: number;
+  sex: Sex;
+  goal: Goal;
+  frequency: Frequency;
+  weight: number;
+  height: number;
+}
+
+interface ExerciseMap {
+  chest: string[];
+  back: string[];
+  legs: string[];
+  shoulders: string[];
+  arms: string[];
+  cardio: string[];
+  core: string[];
+  [key: string]: string[];
+}
+
+// --- CONSTANTS ---
+
+const MOCK_USER_ID = "MOCK_USER_CANVAS_001";
+
+const EXERCISES: ExerciseMap = {
+  chest: ['Supino Reto (Barra)', 'Supino Inclinado (Halteres)', 'Crossover', 'Flexão'],
+  back: ['Remada Curvada', 'Puxada Frontal', 'Levantamento Terra', 'Hiperextensão'],
+  legs: ['Agachamento Livre', 'Leg Press', 'Extensora', 'Flexora'],
+  shoulders: ['Desenvolvimento com Halteres', 'Elevação Lateral', 'Remada Alta', 'Face Pull'],
+  arms: ['Rosca Direta', 'Tríceps Corda', 'Rosca Martelo', 'Tríceps Testa'],
+  cardio: ['Corrida (Esteira)', 'Elíptico', 'Bicicleta', 'Burpees'],
+  core: ['Prancha', 'Abdominal Infra', 'Rotação Russa', 'Elevação de Pernas'],
+};
+
+const GOAL_OPTIONS: Record<Goal, { label: string; icon: any; color: string; bg: string }> = {
+  HYPERTROPHY: { label: 'Hipertrofia', icon: Dumbbell, color: 'text-orange-600', bg: 'bg-orange-100' },
+  WEIGHT_LOSS: { label: 'Perda de Peso', icon: Zap, color: 'text-green-600', bg: 'bg-green-100' },
+  ENDURANCE: { label: 'Resistência', icon: TrendingUp, color: 'text-blue-600', bg: 'bg-blue-100' },
+};
+
+// --- WORKOUT GENERATION LOGIC ---
+
+function selectRandom<T>(arr: T[], count: number): T[] {
+  const shuffled = arr.sort(() => 0.5 - Math.random());
+  return shuffled.slice(0, count);
+}
+
+function generateDailyWorkout(dailyMuscleGroups: BodyPart[], goal: Goal): DailyWorkout {
+  let dailyExercises: Exercise[] = [];
+  let theme = dailyMuscleGroups.map(part => part.charAt(0).toUpperCase() + part.slice(1)).join(' & ');
+
+  for (const part of dailyMuscleGroups) {
+    const availableExercises = EXERCISES[part];
+    const numExercises = (part === 'cardio' || part === 'core') ? 1 : 3;
+
+    const selectedNames = selectRandom(availableExercises, numExercises);
+
+    selectedNames.forEach(exerciseName => {
+      let sets = 3;
+      let reps = '8-12';
+
+      if (goal === 'WEIGHT_LOSS' || part === 'cardio') {
+        sets = part === 'cardio' ? 1 : 4;
+        reps = part === 'cardio' ? '30 min' : '12-15';
+      } else if (goal === 'ENDURANCE') {
+        sets = 5;
+        reps = '15-20';
+      }
+      
+      dailyExercises.push({ name: exerciseName, sets, reps });
+    });
+  }
+
+  return {
+    day: '',
+    theme: theme || 'Descanso',
+    exercises: dailyExercises,
+  };
+}
+
+function generateWorkout(goal: Goal, frequency: Frequency): WorkoutPlan {
+  const numDays = Number(frequency);
+  const plan: DailyWorkout[] = [];
+
+  // A common split logic based on frequency
+  let splitSchedule: BodyPart[][] = [];
+
+  switch (numDays) {
+    case 3:
+      splitSchedule = [
+        ['legs', 'core'],
+        ['chest', 'shoulders', 'arms'],
+        ['back', 'core'],
+        ['cardio']
+      ];
+      break;
+    case 4:
+      splitSchedule = [
+        ['chest', 'shoulders'],
+        ['back', 'arms'],
+        ['legs', 'core'],
+        ['cardio'],
+        ['cardio']
+      ];
+      break;
+    case 5:
+      splitSchedule = [
+        ['chest'],
+        ['back'],
+        ['legs'],
+        ['shoulders', 'core'],
+        ['arms', 'cardio']
+      ];
+      break;
+    case 6:
+      splitSchedule = [
+        ['chest', 'shoulders'],
+        ['back', 'core'],
+        ['legs'],
+        ['shoulders', 'arms'],
+        ['back', 'legs', 'core'],
+        ['cardio']
+      ];
+      break;
+    default:
+      splitSchedule = [];
+  }
+
+  for (let i = 0; i < numDays; i++) {
+    let dayPlan = generateDailyWorkout(splitSchedule[i], goal);
+    dayPlan.day = `Dia ${i + 1}`;
+    plan.push(dayPlan);
+  }
+
+  if (numDays < 6) {
+    plan.push({
+      day: `Dia ${numDays + 1}`,
+      theme: 'Descanso / Active Recovery',
+      exercises: [{ name: 'Descanso Total', sets: 1, reps: '0' }],
+    });
+  }
+  
+  while (plan.length < numDays + 1) {
+    plan.push({
+      day: `Dia ${plan.length + 1}`,
+      theme: 'Descanso Total',
+      exercises: [{ name: 'Descanso Total', sets: 1, reps: '0' }],
+    });
+  }
+
+
+  return {
+    goal: goal,
+    frequency: frequency,
+    dailyPlans: plan.slice(0, numDays + 1),
+    generatedOn: Date.now(),
+  };
+}
+
+// --- FIREBASE INITIALIZATION AND AUTH (USANDO CONFIGURAÇÃO FIXA) ---
+
+// Configuração Firebase fornecida pelo usuário
+const APP_ID = 'fitpro-app';
+const FIREBASE_CONFIG = {
   apiKey: "AIzaSyBZuZ9ztJp58kDsHMTZ-1f0ReqNV2FXypo",
   authDomain: "fitpro-planner.firebaseapp.com",
   projectId: "fitpro-planner",
@@ -49,835 +210,642 @@ const firebaseConfig = {
   appId: "1:1023274795392:web:4a88c84a075c1f21fec165"
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
+const app = initializeApp(FIREBASE_CONFIG);
 const db = getFirestore(app);
-const appId = 'fitpro-app'; // Pode manter esse nome fixo
+const auth = getAuth(app);
 
-// --- UTILITÁRIOS E CONSTANTES ---
 
-const GOALS = {
-  HYPERTROPHY: { label: 'Hipertrofia', icon: Dumbbell, color: 'text-purple-600', bg: 'bg-purple-100' },
-  WEIGHT_LOSS: { label: 'Emagrecimento', icon: Flame, color: 'text-orange-600', bg: 'bg-orange-100' },
-  ENDURANCE: { label: 'Condicionamento', icon: Activity, color: 'text-blue-600', bg: 'bg-blue-100' },
+// Função para obter o caminho correto do documento de perfil
+const getProfileDocRef = (userId: string) => {
+  if (!db) throw new Error("Firestore not initialized.");
+  // Private data path: /artifacts/{APP_ID}/users/{userId}/profile/data
+  return doc(db, 'artifacts', APP_ID, 'users', userId, 'profile', 'data');
 };
 
-const WEEKDAYS = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+// Função para obter o caminho correto do documento do plano de treino
+const getWorkoutDocRef = (userId: string) => {
+  if (!db) throw new Error("Firestore not initialized.");
+  // Private data path: /artifacts/{APP_ID}/users/{userId}/workout/plan
+  return doc(db, 'artifacts', APP_ID, 'users', userId, 'workout', 'plan');
+};
 
-// Algoritmo simples de geração de treino
-const generateTrainingPlan = (goal, frequency, sex) => {
-  let split = 'FULL_BODY';
-  if (frequency >= 4) split = 'UPPER_LOWER';
-  if (frequency >= 5) split = 'ABC';
 
-  // Base de exercícios
-  const exercises = {
-    chest: ['Supino Reto', 'Flexão de Braço', 'Crucifixo', 'Supino Inclinado'],
-    back: ['Puxada Alta', 'Remada Curvada', 'Barra Fixa', 'Remada Baixa'],
-    legs: ['Agachamento Livre', 'Leg Press', 'Cadeira Extensora', 'Stiff', 'Panturrilha'],
-    shoulders: ['Desenvolvimento', 'Elevação Lateral', 'Elevação Frontal'],
-    arms: ['Rosca Direta', 'Tríceps Pulley', 'Rosca Martelo', 'Tríceps Testa'],
-    cardio: ['Esteira (HIIT)', 'Bicicleta', 'Elíptico', 'Pular Corda'],
-    core: ['Prancha', 'Abdominal Supra', 'Abdominal Infra']
+// --- COMPONENTS ---
+
+interface ProfileFormProps {
+  user: FirebaseUser;
+  profile: UserProfile | null;
+  onComplete: (profile: UserProfile, plan: WorkoutPlan) => void;
+}
+
+const ProfileForm: React.FC<ProfileFormProps> = ({ user, profile: initialProfile, onComplete }) => {
+  const [formData, setFormData] = useState<UserProfile>(
+    initialProfile || {
+      name: '',
+      age: 0,
+      sex: 'MALE',
+      goal: 'HYPERTROPHY',
+      frequency: '3',
+      weight: 0,
+      height: 0,
+    }
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const { name, value, type } = e.target;
+    const finalValue = type === 'number' ? Number(value) : value;
+    setFormData(prev => ({ ...prev, [name]: finalValue }));
   };
 
-  const plan = [];
+  const handleGoalChange = (goal: Goal) => {
+    setFormData(prev => ({ ...prev, goal }));
+  };
 
-  // Lógica de distribuição (Simplificada para demo)
-  if (split === 'FULL_BODY') {
-    ['A', 'B', 'C'].slice(0, frequency).forEach((day, index) => {
-      plan.push({
-        id: `treino-${index}`,
-        name: `Treino ${day} - Corpo Todo`,
-        exercises: [
-          { name: exercises.legs[index % 2], sets: 3, reps: '10-12' },
-          { name: exercises.chest[index % 2], sets: 3, reps: '10-12' },
-          { name: exercises.back[index % 2], sets: 3, reps: '10-12' },
-          { name: exercises.shoulders[0], sets: 3, reps: '12-15' },
-          { name: exercises.core[0], sets: 3, reps: 'Falha' },
-        ]
-      });
-    });
-  } else if (split === 'UPPER_LOWER') {
-    const routines = [
-      { type: 'Superiores', muscleGroups: ['chest', 'back', 'shoulders', 'arms'] },
-      { type: 'Inferiores', muscleGroups: ['legs', 'core'] }
-    ];
-    for (let i = 0; i < frequency; i++) {
-      const routine = routines[i % 2];
-      const dailyExercises = [];
-      routine.muscleGroups.forEach(group => {
-        dailyExercises.push({ name: exercises[group][0], sets: 3, reps: '10-12' });
-        if(exercises[group][1]) dailyExercises.push({ name: exercises[group][1], sets: 3, reps: '12-15' });
-      });
-      plan.push({
-        id: `treino-${i}`,
-        name: `Treino ${String.fromCharCode(65+i)} - ${routine.type}`,
-        exercises: dailyExercises
-      });
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+
+    if (formData.name === '' || formData.age <= 0 || formData.weight <= 0 || formData.height <= 0) {
+      setError('Por favor, preencha todos os campos corretamente.');
+      setLoading(false);
+      return;
     }
-  } else {
-    // ABC Split logic
-    const routines = [
-      { name: 'Peito e Tríceps', groups: ['chest', 'arms'] },
-      { name: 'Costas e Bíceps', groups: ['back', 'arms'] },
-      { name: 'Pernas e Ombros', groups: ['legs', 'shoulders'] }
-    ];
-    for(let i=0; i<frequency; i++) {
-        const r = routines[i % 3];
-        plan.push({
-            id: `treino-${i}`,
-            name: `Treino ${String.fromCharCode(65+i)} - ${r.name}`,
-            exercises: [
-                { name: exercises[r.groups[0]][0], sets: 4, reps: '8-10' },
-                { name: exercises[r.groups[0]][1], sets: 3, reps: '10-12' },
-                { name: exercises[r.groups[1]][0], sets: 4, reps: '8-10' },
-                { name: exercises[r.groups[1]][1], sets: 3, reps: '12-15' },
-                { name: exercises.core[0], sets: 3, reps: '20' }
-            ]
-        });
+
+    try {
+      // 1. Generate Workout Plan
+      const newPlan = generateWorkout(formData.goal, formData.frequency);
+
+      // 2. Save Profile
+      if (db) {
+        const profileRef = getProfileDocRef(user.uid);
+        await setDoc(profileRef, formData, { merge: false });
+
+        // 3. Save Workout Plan
+        const workoutRef = getWorkoutDocRef(user.uid);
+        await setDoc(workoutRef, newPlan, { merge: false });
+      }
+
+      onComplete(formData, newPlan);
+    } catch (innerError) {
+      console.error('Erro ao salvar o perfil:', innerError);
+      setError('Erro ao salvar dados. Tente novamente.');
+    } finally {
+      setLoading(false);
     }
-  }
+  };
 
-  // Ajuste para emagrecimento (mais reps, menos descanso hipotético) ou cardio extra
-  if (goal === 'WEIGHT_LOSS') {
-    plan.forEach(day => {
-      day.exercises.push({ name: 'Cardio Final', sets: 1, reps: '20-30 min' });
-    });
-  }
+  return (
+    <div className="max-w-4xl mx-auto p-8 bg-white shadow-xl rounded-xl">
+      <h2 className="text-3xl font-bold mb-6 text-gray-800 flex items-center">
+        <UserIcon className="w-6 h-6 mr-3 text-indigo-600" />
+        Seu Perfil Fitness
+      </h2>
+      <p className="mb-8 text-gray-600">Preencha os dados para gerar um plano de treino personalizado.</p>
+      
+      {user.uid === MOCK_USER_ID && (
+        <div className="p-4 mb-4 bg-yellow-100 text-yellow-700 rounded-lg flex items-start">
+          <AlertTriangle className="w-5 h-5 mr-3 flex-shrink-0 mt-0.5" />
+          <div>
+            <span className="font-bold">Modo Simulado (Mock) Ativo:</span>
+            <p className="text-sm">A autenticação Firebase falhou. Usando o ID de usuário simulado para que o app possa funcionar e salvar dados (somente neste ambiente).</p>
+          </div>
+        </div>
+      )}
 
-  return plan;
+      {error && (
+        <div className="p-4 mb-4 bg-red-100 text-red-700 rounded-lg flex items-center">
+          <AlertTriangle className="w-5 h-5 mr-3" />
+          {error}
+        </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        <div className="grid sm:grid-cols-2 gap-6">
+          <FormInput label="Nome" name="name" type="text" value={formData.name} onChange={handleInputChange} required />
+          <FormInput label="Idade" name="age" type="number" value={formData.age === 0 ? '' : formData.age} onChange={handleInputChange} min={16} max={99} required />
+          <FormInput label="Peso (kg)" name="weight" type="number" value={formData.weight === 0 ? '' : formData.weight} onChange={handleInputChange} min={30} max={250} required />
+          <FormInput label="Altura (cm)" name="height" type="number" value={formData.height === 0 ? '' : formData.height} onChange={handleInputChange} min={100} max={250} required />
+        </div>
+
+        <div className="grid sm:grid-cols-2 gap-6">
+          <FormSelect label="Frequência Semanal (dias de treino)" name="frequency" value={formData.frequency} onChange={handleInputChange} options={[{ label: '3 Dias', value: '3' }, { label: '4 Dias', value: '4' }, { label: '5 Dias', value: '5' }, { label: '6 Dias', value: '6' }]} />
+          <FormSelect label="Gênero" name="sex" value={formData.sex} onChange={handleInputChange} options={[{ label: 'Masculino', value: 'MALE' }, { label: 'Feminino', value: 'FEMALE' }]} />
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Objetivo Principal</label>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {(Object.keys(GOAL_OPTIONS) as Goal[]).map((key: Goal) => {
+              const option = GOAL_OPTIONS[key];
+              const isSelected = formData.goal === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => handleGoalChange(key)}
+                  className={`p-4 rounded-lg border-2 transition-all duration-200 flex items-center justify-center space-x-2 ${
+                    isSelected
+                      ? `border-indigo-500 ${option.bg} shadow-md`
+                      : 'border-gray-200 hover:border-indigo-300 bg-white'
+                  }`}
+                >
+                  <option.icon className={`w-6 h-6 ${option.color}`} />
+                  <span className={`font-semibold ${isSelected ? 'text-indigo-700' : 'text-gray-700'}`}>{option.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full bg-indigo-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-indigo-700 transition-colors duration-200 disabled:opacity-50 flex items-center justify-center"
+        >
+          {loading ? (
+            <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+          ) : (
+            <Save className="w-5 h-5 mr-2" />
+          )}
+          Gerar e Salvar Plano
+        </button>
+      </form>
+    </div>
+  );
 };
 
-// Algoritmo de Nutrição
-const generateNutritionPlan = (profile) => {
-  const { weight, height, age, sex, goal } = profile;
-  
-  // Cálculo TMB (Mifflin-St Jeor)
-  let tmb = (10 * weight) + (6.25 * height) - (5 * age);
-  tmb += (sex === 'male' ? 5 : -161);
-  
-  // Fator de Atividade (Considerando Moderado devido aos treinos)
-  let tdee = Math.round(tmb * 1.55);
-  
-  let targetCalories = tdee;
-  let macros = { p: 0, c: 0, f: 0 }; // Percentagens
-  let suggestionTitle = "";
-
-  if (goal === 'WEIGHT_LOSS') {
-    targetCalories -= 500;
-    macros = { p: 40, c: 30, f: 30 }; // Low carb relativo, high protein
-    suggestionTitle = "Déficit Calórico & Proteínas";
-  } else if (goal === 'HYPERTROPHY') {
-    targetCalories += 300;
-    macros = { p: 30, c: 50, f: 20 }; // High carb para energia
-    suggestionTitle = "Superávit Calórico Limpo";
-  } else {
-    macros = { p: 30, c: 40, f: 30 }; // Manutenção
-    suggestionTitle = "Manutenção & Performance";
-  }
-
-  // Refeições Sugeridas (Simplificado)
-  const meals = [
-    {
-      time: 'Café da Manhã',
-      icon: Coffee,
-      options: goal === 'HYPERTROPHY' 
-        ? ['Ovos mexidos com pão integral', 'Vitamina de banana com aveia e whey']
-        : ['Iogurte natural com frutas vermelhas', 'Omelete de claras com espinafre']
-    },
-    {
-      time: 'Almoço',
-      icon: Utensils,
-      options: ['Peito de frango grelhado', 'Arroz integral ou Batata doce', 'Salada verde à vontade', 'Legumes no vapor']
-    },
-    {
-      time: 'Lanche da Tarde',
-      icon: Apple,
-      options: goal === 'HYPERTROPHY'
-        ? ['Sanduíche de atum e queijo cottage', 'Barra de proteína + Fruta']
-        : ['Mix de castanhas (30g)', 'Maçã ou Pera']
-    },
-    {
-      time: 'Jantar',
-      icon: Utensils,
-      options: ['Filé de peixe ou Patinho moído', 'Mix de vegetais refogados', 'Azeite de oliva extra virgem']
-    }
-  ];
-
-  return { targetCalories, macros, suggestionTitle, meals };
-};
-
-
-// --- COMPONENTES ---
-
-const LoadingScreen = () => (
-  <div className="flex items-center justify-center min-h-screen bg-gray-50">
-    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+// Helper component for input fields
+interface FormInputProps {
+  label: string;
+  name: string;
+  type: 'text' | 'number';
+  value: string | number;
+  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  required?: boolean;
+  min?: number;
+  max?: number;
+}
+const FormInput: React.FC<FormInputProps> = ({ label, name, type, value, onChange, required, min, max }) => (
+  <div>
+    <label htmlFor={name} className="block text-sm font-medium text-gray-700">{label}</label>
+    <input
+      id={name}
+      name={name}
+      type={type}
+      value={value}
+      onChange={onChange}
+      required={required}
+      min={min}
+      max={max}
+      className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+    />
   </div>
 );
 
-const AuthScreen = ({ onLogin }) => {
-  const [isRegistering, setIsRegistering] = useState(false);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [name, setName] = useState('');
-  const [error, setError] = useState('');
+// Helper component for select fields
+interface FormSelectProps {
+  label: string;
+  name: string;
+  value: string;
+  onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void;
+  options: { label: string; value: string }[];
+}
+const FormSelect: React.FC<FormSelectProps> = ({ label, name, value, onChange, options }) => (
+  <div>
+    <label htmlFor={name} className="block text-sm font-medium text-gray-700">{label}</label>
+    <select
+      id={name}
+      name={name}
+      value={value}
+      onChange={onChange}
+      className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md shadow-sm"
+    >
+      {options.map(option => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+    </select>
+  </div>
+);
+
+// Login Component (Simplificado, pois o fallback deve ser imediato)
+const LoginScreen: React.FC<{ onSignIn: () => Promise<void>, error: string | null }> = ({ onSignIn, error }) => {
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (e) => {
+  const handleSignIn = async (e: React.MouseEvent) => {
     e.preventDefault();
-    setError('');
     setLoading(true);
-
     try {
-      if (isRegistering) {
-        try {
-          const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-          await updateProfile(userCredential.user, { displayName: name });
-        } catch (innerError) {
-          if (innerError.code === 'auth/operation-not-allowed') {
-            console.warn("Email/Pass auth disabled. Falling back to anonymous.");
-            let currentUser = auth.currentUser;
-            if (!currentUser) {
-              const anonCred = await signInAnonymously(auth);
-              currentUser = anonCred.user;
-            }
-            await updateProfile(currentUser, { displayName: name });
-          } else {
-            throw innerError;
-          }
-        }
-      } else {
-        try {
-           await signInWithEmailAndPassword(auth, email, password);
-        } catch (innerError) {
-           if (innerError.code === 'auth/operation-not-allowed') {
-             console.warn("Email/Pass auth disabled. Falling back to anonymous.");
-             if (!auth.currentUser) await signInAnonymously(auth);
-           } else {
-             throw innerError;
-           }
-        }
-      }
-    } catch (err) {
-      console.error(err);
-      if (err.code === 'auth/invalid-credential') setError('Credenciais inválidas.');
-      else if (err.code === 'auth/email-already-in-use') setError('E-mail já cadastrado.');
-      else if (err.code === 'auth/weak-password') setError('A senha deve ter pelo menos 6 caracteres.');
-      else setError('Ocorreu um erro. Tente novamente.');
+      await onSignIn();
+    } catch (innerError) {
+      console.error('Login button failed:', innerError);
+      // O App principal vai capturar o erro e atualizar a UI
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-8">
-        <div className="text-center mb-8">
-          <div className="bg-indigo-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
-            <Activity className="w-8 h-8 text-indigo-600" />
-          </div>
-          <h1 className="text-3xl font-bold text-gray-800">FitPro Planner</h1>
-          <p className="text-gray-500 mt-2">Sua jornada fitness começa aqui.</p>
-        </div>
+    <div className="flex items-center justify-center min-h-screen bg-gray-50">
+      <div className="p-8 bg-white shadow-2xl rounded-xl max-w-sm w-full text-center">
+        <Dumbbell className="w-12 h-12 mx-auto text-indigo-600 mb-4" />
+        <h1 className="text-3xl font-extrabold text-gray-900 mb-2">Fitness Planner</h1>
+        <p className="text-gray-500 mb-8">Autenticação com Firebase</p>
 
         {error && (
-          <div className="bg-red-50 text-red-600 p-3 rounded-lg mb-4 text-sm flex items-center">
-            <AlertCircle className="w-4 h-4 mr-2" />
-            {error}
+          <div className="p-3 mb-4 bg-red-100 text-red-700 rounded-lg flex items-center text-left text-sm">
+            <AlertTriangle className="w-4 h-4 mr-2" />
+            <span className="font-semibold">Erro de Autenticação:</span> {error}
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {isRegistering && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Nome Completo</label>
-              <input
-                type="text"
-                required
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </div>
-          )}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">E-mail</label>
-            <input
-              type="email"
-              required
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Senha</label>
-            <input
-              type="password"
-              required
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg transition duration-200 flex items-center justify-center"
-          >
-            {loading ? <div className="animate-spin h-5 w-5 border-2 border-white rounded-full border-t-transparent"/> : (isRegistering ? 'Criar Conta' : 'Entrar')}
-          </button>
-        </form>
-
-        <div className="mt-6 text-center">
-          <p className="text-sm text-gray-600">
-            {isRegistering ? 'Já tem uma conta?' : 'Ainda não tem conta?'}
-            <button
-              onClick={() => setIsRegistering(!isRegistering)}
-              className="ml-2 text-indigo-600 font-medium hover:underline focus:outline-none"
-            >
-              {isRegistering ? 'Fazer Login' : 'Cadastre-se'}
-            </button>
-          </p>
-        </div>
+        <button
+          onClick={handleSignIn}
+          disabled={loading}
+          className="w-full bg-indigo-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-indigo-700 transition-colors duration-200 disabled:opacity-50"
+        >
+          {loading ? 'Entrando...' : 'Entrar'}
+        </button>
       </div>
     </div>
   );
 };
 
-const OnboardingForm = ({ user, onComplete }) => {
-  const [step, setStep] = useState(1);
-  const [formData, setFormData] = useState({
-    sex: 'male',
-    age: '',
-    weight: '',
-    height: '',
-    goal: 'HYPERTROPHY',
-    frequency: 3,
-  });
-  const [loading, setLoading] = useState(false);
 
-  const handleSave = async () => {
+interface WorkoutViewProps {
+  user: FirebaseUser;
+  profile: UserProfile;
+  plan: WorkoutPlan;
+  onLogout: () => void;
+  onGenerateNew: (profile: UserProfile, newPlan: WorkoutPlan) => void;
+}
+
+const WorkoutView: React.FC<WorkoutViewProps> = ({ user, profile, plan, onLogout, onGenerateNew }) => {
+  const [selectedDayIndex, setSelectedDayIndex] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const selectedDay = plan.dailyPlans[selectedDayIndex];
+
+  const bmi = (profile.weight) / ((profile.height / 100) * (profile.height / 100));
+  const formattedBmi = bmi.toFixed(1);
+
+  const handleGenerateNew = async () => {
+    if (!window.confirm('Tem certeza? Isso irá substituir seu plano de treino atual.')) {
+        return;
+    }
     setLoading(true);
     try {
-      const plan = generateTrainingPlan(formData.goal, parseInt(formData.frequency), formData.sex);
-      const profileData = {
-        ...formData,
-        createdAt: serverTimestamp(),
-        trainingPlan: plan,
-        active: true,
-      };
-
-      const userRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'main');
-      await setDoc(userRef, profileData);
-      onComplete(profileData);
+        const newPlan = generateWorkout(profile.goal, profile.frequency);
+        if (db) {
+            const workoutRef = getWorkoutDocRef(user.uid);
+            await setDoc(workoutRef, newPlan, { merge: false });
+            onGenerateNew(profile, newPlan);
+        }
     } catch (error) {
-      console.error("Error saving profile:", error);
-      alert("Erro ao salvar perfil. Tente novamente.");
+        console.error('Erro ao gerar novo plano:', error);
     } finally {
-      setLoading(false);
+        setLoading(false);
     }
-  };
+  }
 
-  const renderStep = () => {
-    switch(step) {
-      case 1:
-        return (
-          <div className="space-y-6">
-            <h2 className="text-xl font-semibold text-gray-800">Vamos conhecer você</h2>
-            <div className="grid grid-cols-2 gap-4">
-              <button 
-                onClick={() => setFormData({...formData, sex: 'male'})}
-                className={`p-4 rounded-xl border-2 flex flex-col items-center ${formData.sex === 'male' ? 'border-indigo-600 bg-indigo-50 text-indigo-700' : 'border-gray-200 hover:border-gray-300'}`}
-              >
-                <div className="bg-blue-100 p-2 rounded-full mb-2"><User className="w-6 h-6 text-blue-600"/></div>
-                <span className="font-medium">Masculino</span>
-              </button>
-              <button 
-                onClick={() => setFormData({...formData, sex: 'female'})}
-                className={`p-4 rounded-xl border-2 flex flex-col items-center ${formData.sex === 'female' ? 'border-indigo-600 bg-indigo-50 text-indigo-700' : 'border-gray-200 hover:border-gray-300'}`}
-              >
-                <div className="bg-pink-100 p-2 rounded-full mb-2"><User className="w-6 h-6 text-pink-600"/></div>
-                <span className="font-medium">Feminino</span>
-              </button>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Idade</label>
-              <input 
-                type="number" 
-                value={formData.age} 
-                onChange={e => setFormData({...formData, age: e.target.value})}
-                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500"
-                placeholder="Ex: 25"
-              />
-            </div>
-          </div>
-        );
-      case 2:
-        return (
-          <div className="space-y-6">
-            <h2 className="text-xl font-semibold text-gray-800">Medidas Corporais</h2>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Peso (kg)</label>
-                <div className="relative">
-                  <Scale className="absolute left-3 top-3.5 w-5 h-5 text-gray-400" />
-                  <input 
-                    type="number" 
-                    value={formData.weight} 
-                    onChange={e => setFormData({...formData, weight: e.target.value})}
-                    className="w-full pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500"
-                    placeholder="70.5"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Altura (cm)</label>
-                <div className="relative">
-                  <Ruler className="absolute left-3 top-3.5 w-5 h-5 text-gray-400" />
-                  <input 
-                    type="number" 
-                    value={formData.height} 
-                    onChange={e => setFormData({...formData, height: e.target.value})}
-                    className="w-full pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500"
-                    placeholder="175"
-                  />
-                </div>
-              </div>
-            </div>
-            
-            <div className="pt-4">
-              <label className="block text-sm font-medium text-gray-700 mb-3">Frequência de Treino Semanal</label>
-              <input 
-                type="range" 
-                min="1" 
-                max="7" 
-                value={formData.frequency} 
-                onChange={e => setFormData({...formData, frequency: e.target.value})}
-                className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
-              />
-              <div className="text-center mt-2 font-semibold text-indigo-600">{formData.frequency} dias por semana</div>
-            </div>
-          </div>
-        );
-      case 3:
-        return (
-          <div className="space-y-6">
-            <h2 className="text-xl font-semibold text-gray-800">Qual seu objetivo principal?</h2>
-            <div className="space-y-3">
-              {Object.entries(GOALS).map(([key, value]) => (
+  const handleLogoutClick = () => {
+    // Se estiver no modo mock, apenas recarrega para limpar o estado
+    if (user.uid === MOCK_USER_ID) {
+      window.location.reload();
+      return;
+    }
+    onLogout();
+  }
+
+
+  return (
+    <div className="max-w-6xl mx-auto p-4 md:p-8 bg-gray-50 min-h-screen">
+      <header className="flex justify-between items-center mb-8 p-4 bg-white shadow-md rounded-xl">
+        <div className="flex flex-col">
+            <h1 className="text-3xl font-bold text-gray-800">Seu Plano de Treino Personalizado</h1>
+            <p className="text-sm text-gray-500">
+                Olá, {profile.name}! Usuário ID: <span className="font-mono text-xs bg-gray-100 p-1 rounded">{user.uid}</span>
+            </p>
+            {user.uid === MOCK_USER_ID && (
+                <p className="text-xs text-yellow-600 font-semibold mt-1">
+                    (MODO SIMULADO - O logout apenas recarregará a página)
+                </p>
+            )}
+        </div>
+        <button
+          onClick={handleLogoutClick}
+          className="bg-red-100 text-red-600 p-2 rounded-lg hover:bg-red-200 transition-colors flex items-center text-sm font-semibold"
+        >
+          <LogOut className="w-4 h-4 mr-1" /> Sair
+        </button>
+      </header>
+      
+      {/* Overview & Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <StatCard title="Objetivo" value={GOAL_OPTIONS[profile.goal].label} icon={GOAL_OPTIONS[profile.goal].icon} color={GOAL_OPTIONS[profile.goal].color} />
+        <StatCard title="Frequência Semanal" value={`${profile.frequency} Dias`} icon={CalendarDays} color="text-indigo-600" />
+        <StatCard title="IMC Calculado" value={formattedBmi} icon={BarChart3} color="text-teal-600" />
+      </div>
+
+      {/* Plan Navigation and Detail */}
+      <div className="bg-white p-6 rounded-xl shadow-md">
+        <div className="flex flex-wrap border-b border-gray-200 mb-6">
+          {plan.dailyPlans.map((dailyPlan, idx) => (
+            <button
+              key={dailyPlan.day}
+              onClick={() => setSelectedDayIndex(idx)}
+              className={`py-3 px-4 font-semibold transition-colors duration-200 border-b-4 ${
+                idx === selectedDayIndex
+                  ? 'border-indigo-600 text-indigo-700'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              {dailyPlan.day}
+            </button>
+          ))}
+        </div>
+
+        {selectedDay && (
+          <div>
+            <div className="flex justify-between items-center mb-4">
+                <h2 className="text-2xl font-bold text-gray-800 flex items-center">
+                    <Dumbbell className="w-5 h-5 mr-2 text-indigo-500" />
+                    {selectedDay.theme}
+                </h2>
                 <button
-                  key={key}
-                  onClick={() => setFormData({...formData, goal: key})}
-                  className={`w-full p-4 rounded-xl border-2 flex items-center justify-between transition-all ${
-                    formData.goal === key 
-                    ? `border-${value.color.split('-')[1]}-500 bg-${value.color.split('-')[1]}-50` 
-                    : 'border-gray-200 hover:border-gray-300'
-                  }`}
+                    onClick={handleGenerateNew}
+                    disabled={loading}
+                    className="bg-indigo-50 text-indigo-600 py-2 px-4 rounded-lg text-sm font-semibold hover:bg-indigo-100 transition-colors disabled:opacity-50"
                 >
-                  <div className="flex items-center">
-                    <div className={`p-2 rounded-lg mr-4 ${value.bg}`}>
-                      <value.icon className={`w-6 h-6 ${value.color}`} />
-                    </div>
-                    <span className={`font-semibold ${formData.goal === key ? 'text-gray-900' : 'text-gray-600'}`}>{value.label}</span>
-                  </div>
-                  {formData.goal === key && <CheckCircle2 className="w-6 h-6 text-indigo-600" />}
+                    {loading ? 'Gerando...' : 'Gerar Novo Plano'}
                 </button>
+            </div>
+
+            <p className="text-sm text-gray-500 mb-6">
+                Gerado em: {new Date(plan.generatedOn).toLocaleDateString('pt-BR')}
+            </p>
+
+            <div className="space-y-4">
+              {selectedDay.exercises.map((ex: Exercise, idx: number) => (
+                <div key={idx} className="p-4 border border-gray-100 bg-white rounded-lg shadow-sm flex justify-between items-center">
+                  <div className='flex items-center space-x-3'>
+                    <span className="text-lg font-bold text-indigo-600 w-8">{idx + 1}.</span>
+                    <span className="text-lg font-semibold text-gray-800">{ex.name}</span>
+                  </div>
+                  <div className="flex space-x-6 text-gray-600">
+                    <div className="flex items-center bg-indigo-50 px-3 py-1 rounded-full text-sm font-medium">
+                        <CheckCircle className="w-4 h-4 mr-1 text-indigo-500" />
+                        {ex.sets} Sets
+                    </div>
+                    <div className="flex items-center bg-gray-100 px-3 py-1 rounded-full text-sm font-medium">
+                        <Clock className="w-4 h-4 mr-1 text-gray-500" />
+                        {ex.reps} Reps
+                    </div>
+                  </div>
+                </div>
               ))}
             </div>
           </div>
-        );
-      default: return null;
-    }
-  };
-
-  return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-lg w-full max-w-lg overflow-hidden">
-        <div className="bg-indigo-600 p-6 text-white text-center">
-          <h1 className="text-2xl font-bold">Configuração do Perfil</h1>
-          <p className="opacity-80 text-sm mt-1">Passo {step} de 3</p>
-        </div>
-        
-        <div className="p-8">
-          {renderStep()}
-
-          <div className="mt-8 flex justify-between">
-            {step > 1 ? (
-              <button 
-                onClick={() => setStep(step - 1)}
-                className="text-gray-500 font-medium px-4 py-2 hover:bg-gray-100 rounded-lg"
-              >
-                Voltar
-              </button>
-            ) : <div></div>}
-            
-            <button
-              onClick={() => step < 3 ? setStep(step + 1) : handleSave()}
-              disabled={loading}
-              className="bg-indigo-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-indigo-700 flex items-center shadow-lg shadow-indigo-200"
-            >
-              {loading ? 'Gerando Plano...' : (step === 3 ? 'Finalizar e Gerar Treino' : 'Próximo')}
-              {!loading && step < 3 && <ChevronRight className="w-4 h-4 ml-2" />}
-            </button>
-          </div>
-        </div>
+        )}
       </div>
+
     </div>
   );
 };
 
-const Dashboard = ({ user, profile, onLogout }) => {
-  const [completedToday, setCompletedToday] = useState({});
-  const [activeTab, setActiveTab] = useState('today'); // 'today', 'week'
-  const [showMobileMenu, setShowMobileMenu] = useState(false);
-
-  // Memoriza o plano nutricional para evitar recálculos
-  const nutrition = useMemo(() => generateNutritionPlan(profile), [profile]);
-
-  const todayIndex = new Date().getDay(); 
-  const dayName = WEEKDAYS[todayIndex];
-  
-  const dayOfYear = Math.floor((new Date() - new Date(new Date().getFullYear(), 0, 0)) / 1000 / 60 / 60 / 24);
-  const workoutIndex = dayOfYear % profile.trainingPlan.length;
-  const todaysWorkout = profile.trainingPlan[workoutIndex];
-
-  const toggleExercise = (exerciseName) => {
-    setCompletedToday(prev => ({
-      ...prev,
-      [exerciseName]: !prev[exerciseName]
-    }));
-  };
-
-  const calculateProgress = () => {
-    const total = todaysWorkout.exercises.length;
-    const done = Object.values(completedToday).filter(Boolean).length;
-    return Math.round((done / total) * 100);
-  };
-
-  const progress = calculateProgress();
-
-  return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
-      {/* Header */}
-      <header className="bg-white shadow-sm sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16 items-center">
-            <div className="flex items-center">
-              <div className="bg-indigo-600 rounded-lg p-2 mr-3">
-                <Dumbbell className="w-6 h-6 text-white" />
-              </div>
-              <div>
-                <h1 className="text-xl font-bold text-gray-800 hidden sm:block">FitPro Planner</h1>
-                <p className="text-xs text-gray-500 hidden sm:block">Olá, {user.displayName || 'Atleta'}</p>
-              </div>
+// StatCard Component
+interface StatCardProps {
+    title: string;
+    value: string;
+    icon: any;
+    color: string;
+}
+const StatCard: React.FC<StatCardProps> = ({ title, value, icon: Icon, color }) => (
+    <div className="bg-white p-6 rounded-xl shadow-md border-t-4 border-indigo-600">
+        <div className="flex items-center">
+            <div className={`p-3 rounded-full ${color.replace('text-', 'bg-')}/20 mr-4`}>
+                <Icon className={`w-6 h-6 ${color}`} />
             </div>
-
-            <div className="hidden md:flex items-center space-x-4">
-               <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium flex items-center">
-                 <CheckCircle2 className="w-4 h-4 mr-1"/> Conta Ativa
-               </span>
-               <button onClick={onLogout} className="text-gray-500 hover:text-red-600 transition-colors">
-                 <LogOut className="w-6 h-6" />
-               </button>
+            <div>
+                <p className="text-sm font-medium text-gray-500">{title}</p>
+                <p className="text-2xl font-bold text-gray-900">{value}</p>
             </div>
-
-            <button className="md:hidden p-2" onClick={() => setShowMobileMenu(!showMobileMenu)}>
-              {showMobileMenu ? <X className="w-6 h-6"/> : <Menu className="w-6 h-6"/>}
-            </button>
-          </div>
         </div>
-        
-        {/* Mobile Menu */}
-        {showMobileMenu && (
-          <div className="md:hidden bg-white border-t p-4 space-y-2">
-            <div className="text-sm font-semibold text-gray-700">{user.displayName}</div>
-            <div className="text-xs text-gray-500 mb-2">{user.email}</div>
-            <button onClick={onLogout} className="w-full text-left py-2 text-red-600 font-medium flex items-center">
-              <LogOut className="w-4 h-4 mr-2" /> Sair
-            </button>
-          </div>
-        )}
-      </header>
-
-      {/* Main Content */}
-      <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8">
-        
-        {/* Stats Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-          <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100 flex items-center">
-            <div className="p-3 rounded-full bg-blue-50 text-blue-600 mr-4">
-              <TrendingUp className="w-8 h-8" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Objetivo</p>
-              <p className="text-lg font-bold text-gray-800">{GOALS[profile.goal]?.label}</p>
-            </div>
-          </div>
-          
-          <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100 flex items-center">
-            <div className="p-3 rounded-full bg-indigo-50 text-indigo-600 mr-4">
-              <Calendar className="w-8 h-8" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Frequência</p>
-              <p className="text-lg font-bold text-gray-800">{profile.frequency}x / Semana</p>
-            </div>
-          </div>
-
-          <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100 flex items-center">
-             <div className="p-3 rounded-full bg-orange-50 text-orange-600 mr-4">
-              <Scale className="w-8 h-8" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Peso Atual</p>
-              <p className="text-lg font-bold text-gray-800">{profile.weight} kg</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Dashboard Tabs */}
-        <div className="flex border-b border-gray-200 mb-6">
-          <button 
-            className={`pb-4 px-4 font-medium text-sm transition-colors relative ${activeTab === 'today' ? 'text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
-            onClick={() => setActiveTab('today')}
-          >
-            Treino de Hoje
-            {activeTab === 'today' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-indigo-600 rounded-t-lg"></div>}
-          </button>
-          <button 
-            className={`pb-4 px-4 font-medium text-sm transition-colors relative ${activeTab === 'week' ? 'text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
-            onClick={() => setActiveTab('week')}
-          >
-            Sua Rotina Completa
-            {activeTab === 'week' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-indigo-600 rounded-t-lg"></div>}
-          </button>
-        </div>
-
-        {activeTab === 'today' ? (
-          <div className="space-y-8">
-            {/* Training Card */}
-            <div>
-              <div className="bg-gradient-to-r from-indigo-600 to-purple-600 rounded-2xl p-6 text-white shadow-lg relative overflow-hidden mb-6">
-                <div className="relative z-10">
-                  <div className="flex items-center justify-between mb-2">
-                    <h2 className="text-2xl font-bold">{dayName}</h2>
-                    <span className="bg-white/20 px-3 py-1 rounded-full text-sm font-medium backdrop-blur-sm">
-                      {todaysWorkout.name}
-                    </span>
-                  </div>
-                  <p className="text-indigo-100 mb-6">Foco de hoje: {profile.goal === 'WEIGHT_LOSS' ? 'Alta intensidade' : 'Força e Técnica'}</p>
-                  
-                  {/* Progress Bar */}
-                  <div className="flex items-center space-x-4">
-                    <div className="flex-1 h-3 bg-black/20 rounded-full overflow-hidden">
-                      <div 
-                        className="h-full bg-white transition-all duration-500 ease-out" 
-                        style={{ width: `${progress}%` }}
-                      ></div>
-                    </div>
-                    <span className="font-bold">{progress}%</span>
-                  </div>
-                </div>
-                <Activity className="absolute right-0 bottom-0 w-48 h-48 text-white/10 -mr-8 -mb-8 transform rotate-12" />
-              </div>
-
-              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-                <div className="p-6 border-b border-gray-100">
-                  <h3 className="font-bold text-gray-800 text-lg">Exercícios</h3>
-                </div>
-                <div className="divide-y divide-gray-100">
-                  {todaysWorkout.exercises.map((ex, idx) => (
-                    <div 
-                      key={idx} 
-                      className={`p-4 flex items-center justify-between transition-colors ${completedToday[ex.name] ? 'bg-gray-50' : 'hover:bg-gray-50'}`}
-                      onClick={() => toggleExercise(ex.name)}
-                    >
-                      <div className="flex items-center space-x-4">
-                        <button className={`transition-all duration-200 ${completedToday[ex.name] ? 'text-green-500' : 'text-gray-300 hover:text-indigo-500'}`}>
-                          {completedToday[ex.name] ? <CheckCircle2 className="w-8 h-8" /> : <Circle className="w-8 h-8" />}
-                        </button>
-                        <div>
-                          <p className={`font-semibold text-lg ${completedToday[ex.name] ? 'text-gray-400 line-through' : 'text-gray-800'}`}>{ex.name}</p>
-                          <p className="text-sm text-gray-500">{ex.sets} séries x {ex.reps} reps</p>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              
-              {progress === 100 && (
-                <div className="bg-green-100 text-green-800 p-4 rounded-xl text-center font-medium animate-pulse mt-4">
-                  🎉 Parabéns! Treino do dia concluído!
-                </div>
-              )}
-            </div>
-
-            {/* Nutrition Section */}
-            <div className="border-t border-gray-200 pt-8">
-              <h3 className="text-xl font-bold text-gray-800 mb-6 flex items-center">
-                <Utensils className="w-6 h-6 mr-2 text-indigo-600" />
-                Sugestões Alimentares
-              </h3>
-
-              {/* Macro Cards */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold text-gray-400 uppercase">Calorias</span>
-                    <Flame className="w-4 h-4 text-orange-500" />
-                  </div>
-                  <p className="text-2xl font-bold text-gray-800">{nutrition.targetCalories}</p>
-                  <p className="text-xs text-gray-500">Kcal/dia</p>
-                </div>
-                <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold text-gray-400 uppercase">Proteína</span>
-                    <Zap className="w-4 h-4 text-blue-500" />
-                  </div>
-                  <p className="text-2xl font-bold text-gray-800">{nutrition.macros.p}%</p>
-                  <p className="text-xs text-gray-500">da dieta</p>
-                </div>
-                <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold text-gray-400 uppercase">Carbos</span>
-                    <Zap className="w-4 h-4 text-yellow-500" />
-                  </div>
-                  <p className="text-2xl font-bold text-gray-800">{nutrition.macros.c}%</p>
-                  <p className="text-xs text-gray-500">da dieta</p>
-                </div>
-                <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold text-gray-400 uppercase">Gorduras</span>
-                    <Zap className="w-4 h-4 text-red-500" />
-                  </div>
-                  <p className="text-2xl font-bold text-gray-800">{nutrition.macros.f}%</p>
-                  <p className="text-xs text-gray-500">da dieta</p>
-                </div>
-              </div>
-
-              {/* Meal Plan */}
-              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
-                 <div className="mb-4">
-                    <span className="text-sm font-semibold text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full">
-                      Estratégia: {nutrition.suggestionTitle}
-                    </span>
-                 </div>
-                 <div className="space-y-6">
-                    {nutrition.meals.map((meal, idx) => (
-                      <div key={idx} className="flex items-start">
-                        <div className="bg-gray-100 p-3 rounded-xl mr-4">
-                           <meal.icon className="w-6 h-6 text-gray-600" />
-                        </div>
-                        <div>
-                          <h4 className="font-bold text-gray-800">{meal.time}</h4>
-                          <ul className="mt-1 space-y-1">
-                            {meal.options.map((opt, i) => (
-                              <li key={i} className="text-sm text-gray-600 flex items-center">
-                                <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 mr-2"></div>
-                                {opt}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      </div>
-                    ))}
-                 </div>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {profile.trainingPlan.map((plan, idx) => (
-              <div key={idx} className="bg-white rounded-xl p-6 shadow-sm border border-gray-200 hover:shadow-md transition-shadow">
-                <div className="flex justify-between items-start mb-4">
-                  <h3 className="font-bold text-gray-800 text-lg">{plan.name}</h3>
-                  <span className="bg-gray-100 text-gray-600 px-2 py-1 rounded text-xs font-bold uppercase">Treino {String.fromCharCode(65+idx)}</span>
-                </div>
-                <ul className="space-y-2">
-                  {plan.exercises.map((ex, i) => (
-                    <li key={i} className="text-sm text-gray-600 flex justify-between">
-                      <span>{ex.name}</span>
-                      <span className="text-gray-400">{ex.sets}x{ex.reps}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
-          </div>
-        )}
-      </main>
     </div>
-  );
-};
+);
+
+
+// --- MAIN APPLICATION COMPONENT ---
 
 export default function App() {
-  const [user, setUser] = useState(null);
-  const [profile, setProfile] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [appInitialized, setAppInitialized] = useState(false);
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [workoutPlan, setWorkoutPlan] = useState<WorkoutPlan | null>(null);
+  const [page, setPage] = useState<Page>('login');
+  const [authError, setAuthError] = useState<string | null>(null); 
 
-  // Auth Initialization
-  useEffect(() => {
-    const initAuth = async () => {
-      // 1. Tentar Token Customizado (prioridade)
-      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-        try {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } catch (e) {
-          console.warn("Custom token failed, trying anonymous", e);
-          // Falha no custom token, tentar anônimo
-          try { await signInAnonymously(auth); } catch (err) { console.error("Anon auth failed", err); }
-        }
-      } else {
-        // 2. Tentar Anônimo se não houver usuário
-        if (!auth.currentUser) {
-            try { await signInAnonymously(auth); } catch (err) { console.error("Anon auth failed", err); }
-        }
-      }
-    };
-    initAuth();
+  const userId = user?.uid;
 
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
-      if (currentUser) {
-        // Fetch Profile
+  // 1. Authentication and Initialization
+  const handleAuth = useCallback(async () => {
+    if (!auth || !db) {
+        console.error("Firebase services not available.");
+        setAppInitialized(true);
+        return;
+    }
+
+    let authSucceeded = false;
+    try {
+        // Tentar autenticação real
+        const initialAuthToken = (window as any).__initial_auth_token;
+        
+        // Tenta Login Anônimo primeiro
         try {
-          // Rule 1: Accessing user specific data in /artifacts/{appId}/users/{uid}/profile/main
-          const docRef = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'profile', 'main');
-          const docSnap = await getDoc(docRef);
-          
-          if (docSnap.exists()) {
-            setProfile(docSnap.data());
-          } else {
-            setProfile(null); // Triggers onboarding
+            await signInAnonymously(auth);
+            authSucceeded = true;
+        } catch (anonError) {
+            // Se falhar, tentar o token customizado
+            if (typeof initialAuthToken !== 'undefined') {
+                await signInWithCustomToken(auth, initialAuthToken);
+                authSucceeded = true;
+            } else {
+                // Se nenhum dos dois funcionar, lançar o erro
+                throw anonError;
+            }
+        }
+        setAuthError(null); 
+        
+    } catch (error) {
+        // --- FALLBACK PARA MOCK AUTH ---
+        const errorMessage = (error as any).code?.includes('auth/') 
+          ? (error as any).code.replace('auth/', '').replace(/-/g, ' ').toUpperCase() 
+          : 'ERRO DESCONHECIDO';
+        
+        console.warn(`Real Firebase Auth failed: ${errorMessage}. Falling back to MOCK AUTH.`);
+        
+        const mockUser: FirebaseUser = { uid: MOCK_USER_ID, email: 'mock@canvas.com' };
+        setUser(mockUser);
+        setAppInitialized(true);
+        setAuthError(errorMessage);
+        return; // Sai daqui para não esperar onAuthStateChanged
+    }
+    
+    // Set up auth state listener (apenas para usuários reais, caso o try tenha sucesso)
+    if (authSucceeded) {
+      const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+        if (currentUser) {
+          setUser(currentUser as FirebaseUser); 
+        } else {
+          // Garante que o usuário mock não seja definido como nulo se for um logout real
+          if (user?.uid !== MOCK_USER_ID) {
+              setUser(null);
           }
-        } catch (err) {
-          console.error("Error fetching profile:", err);
+          setProfile(null);
+          setWorkoutPlan(null);
         }
-      } else {
-        setProfile(null);
-      }
-      setLoading(false);
-    });
+        setAppInitialized(true);
+      });
+      return unsubscribe;
+    }
 
-    return () => unsubscribe();
+  }, [user?.uid]);
+
+  // 2. Data Loading (Profile and Workout Plan)
+  useEffect(() => {
+    if (!userId || !db) return;
+
+    let unsubscribeProfile: () => void = () => {};
+    let unsubscribeWorkout: () => void = () => {};
+    
+    // Se estiver no modo mock, não esperamos por onAuthStateChanged para buscar dados
+    if (userId) {
+        // Load Profile
+        try {
+            unsubscribeProfile = onSnapshot(getProfileDocRef(userId), (doc) => {
+                if (doc.exists()) {
+                    const data = doc.data() as UserProfile;
+                    setProfile(data);
+                } else {
+                    setProfile(null);
+                }
+            });
+        } catch (error) {
+            console.error("Error subscribing to profile:", error);
+        }
+
+        // Load Workout Plan
+        try {
+            unsubscribeWorkout = onSnapshot(getWorkoutDocRef(userId), (doc) => {
+                if (doc.exists()) {
+                    const data = doc.data() as WorkoutPlan;
+                    setWorkoutPlan(data);
+                } else {
+                    setWorkoutPlan(null);
+                }
+            });
+        } catch (error) {
+            console.error("Error subscribing to workout plan:", error);
+        }
+    }
+
+    // Clean up listeners
+    return () => {
+        unsubscribeProfile();
+        unsubscribeWorkout();
+    };
+
+  }, [userId]);
+
+
+  // 3. Page Navigation Logic
+  useEffect(() => {
+    if (!appInitialized) return;
+    
+    if (user) {
+      if (profile && workoutPlan) {
+        setPage('workout');
+      } else {
+        setPage('profile');
+      }
+    } else {
+      setPage('login');
+    }
+  }, [user, profile, workoutPlan, appInitialized]);
+
+  // Handle Sign In (re-attempt real auth if failed)
+  const handleSignIn = useCallback(async () => {
+    // Tenta reautenticar (será tratado por handleAuth)
+    await handleAuth();
+  }, [handleAuth]);
+  
+  // Handle Logout (real firebase logout, or page reload for mock)
+  const handleLogout = useCallback(() => {
+    if (auth) {
+      signOut(auth);
+    }
+    // O onAuthStateChanged deve limpar o usuário, mas forçamos o refresh para o mock
+    if (user?.uid === MOCK_USER_ID) {
+        window.location.reload();
+    }
+  }, [user?.uid]);
+
+  // Handle form submission and plan update
+  const handleProfileComplete = useCallback((newProfile: UserProfile, newPlan: WorkoutPlan) => {
+      setProfile(newProfile);
+      setWorkoutPlan(newPlan);
+      setPage('workout');
+  }, []);
+  
+  const handleGenerateNew = useCallback((newProfile: UserProfile, newPlan: WorkoutPlan) => {
+      setProfile(newProfile);
+      setWorkoutPlan(newPlan);
   }, []);
 
-  const handleLogout = async () => {
-    await signOut(auth);
-    setProfile(null);
-  };
 
-  if (loading) return <LoadingScreen />;
+  // Run initial authentication setup
+  useEffect(() => {
+    handleAuth();
+  }, [handleAuth]);
 
-  if (!user) return <AuthScreen />;
 
-  if (!profile) return <OnboardingForm user={user} onComplete={(p) => setProfile(p)} />;
+  // --- Render based on State/Page ---
+  if (!appInitialized && !userId) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-gray-50">
+        <svg className="animate-spin h-8 w-8 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <span className="ml-3 text-gray-700">Carregando autenticação...</span>
+      </div>
+    );
+  }
 
-  return <Dashboard user={user} profile={profile} onLogout={handleLogout} />;
+  return (
+    <div className="font-sans antialiased text-gray-900">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+      `}</style>
+      
+      {page === 'login' && <LoginScreen onSignIn={handleSignIn} error={authError} />}
+
+      {page === 'profile' && user && (
+        <div className='py-12 bg-gray-50'>
+            <ProfileForm user={user} profile={profile} onComplete={handleProfileComplete} />
+        </div>
+      )}
+
+      {page === 'workout' && user && profile && workoutPlan && (
+        <WorkoutView user={user} profile={profile} plan={workoutPlan} onLogout={handleLogout} onGenerateNew={handleGenerateNew} />
+      )}
+    </div>
+  );
 }
