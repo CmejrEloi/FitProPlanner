@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from 'firebase/auth';
-import { getFirestore, doc, setDoc, onSnapshot, getDoc } from 'firebase/firestore'; 
+import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore'; 
 import { AlertTriangle, Dumbbell, Zap, TrendingUp, User as UserIcon, LogOut, CheckCircle, Save, CalendarDays, BarChart3, Clock } from 'lucide-react';
 
 // --- TYPE DEFINITIONS ---
@@ -496,6 +496,8 @@ const WorkoutView: React.FC<WorkoutViewProps> = ({ user, profile, plan, onLogout
   const formattedBmi = bmi.toFixed(1);
 
   const handleGenerateNew = async () => {
+    // Usando window.confirm() apenas neste contexto, sabendo da limitação do iFrame.
+    // Em um ambiente de produção React/Vercel, isso seria substituído por um Modal personalizado.
     if (!window.confirm('Tem certeza? Isso irá substituir seu plano de treino atual.')) {
         return;
     }
